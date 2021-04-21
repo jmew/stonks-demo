@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as plticker
 import tensorboard
-# import torch.profiler
+import torch.profiler
 
 
 def split_data(stock_val, lookback):
@@ -33,23 +33,35 @@ def split_data(stock_val, lookback):
     return [x_train, y_train, x_test, y_test]
 
 def train(num_epochs, model, x_train, y_train, writer, title):
-    criterion = torch.nn.MSELoss(reduction='mean')
+    criterion = torch.nn.MSELoss(reduction='mean').cuda()
     optimiser = torch.optim.Adam(model.parameters(), lr=0.01)
 
     hist = np.zeros(num_epochs)
     start_time = time.time()
 
-    for t in range(num_epochs):
-        y_train_pred = model(x_train)
-        loss = criterion(y_train_pred, y_train)
-        print("Epoch ", t, "MSE: ", loss.item())
-        hist[t] = loss.item()
-        optimiser.zero_grad()
-        loss.backward()
-        optimiser.step()
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA],
+        schedule=torch.profiler.schedule(
+            wait=2,
+            warmup=3,
+            active=6),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler('./runs/profiler'),
+        with_stack=True,
+        record_shapes=True
+    ) as p:
+        for t in range(num_epochs):
+            y_train_pred = model(x_train)
+            loss = criterion(y_train_pred, y_train)
+            print("Epoch ", t, "MSE: ", loss.item())
+            hist[t] = loss.item()
+            optimiser.zero_grad()
+            loss.backward()
+            optimiser.step()
 
-        writer.add_scalar(title, loss.item(), t)
-        # p.step()
+            writer.add_scalar(title, loss.item(), t)
+            p.step()
         
     training_time = time.time()-start_time
 
@@ -58,8 +70,13 @@ def predict(model, x_test, y_test, scaler):
     y_test_pred = model(x_test)
 
     # invert predictions
-    y_test_pred = scaler.inverse_transform(y_test_pred.detach().numpy())
-    y_test = scaler.inverse_transform(y_test.detach().numpy())
+    use_cuda = torch.cuda.is_available()
+    if use_cuda:
+        y_test_pred = scaler.inverse_transform(y_test_pred.detach().cpu().numpy())
+        y_test = scaler.inverse_transform(y_test.detach().cpu().numpy())
+    else:
+        y_test_pred = scaler.inverse_transform(y_test_pred.detach().numpy())
+        y_test = scaler.inverse_transform(y_test.detach().numpy())
     return y_test, y_test_pred
 
 def plot_results(y_test, y_test_pred, df):
